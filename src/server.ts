@@ -6,6 +6,7 @@ require('dotenv').config({
 
 import express, { Request, Response } from 'express';
 import * as path from 'path';
+import * as fs from 'fs';
 import { fetchAndSaveCustomers, exportCustomersToCSV } from './export-service';
 import {
   getExportJob,
@@ -90,6 +91,7 @@ app.post('/api/export/:storeName', async (req: Request, res: Response) => {
     storeName,
     jobId: latestJob?.id || 'pending',
     status: 'Export running in background. Use /api/status/:storeName to check progress.',
+    downloadUrl: exportCsv ? `/api/download-csv/${storeName}/latest` : null,
   });
 });
 
@@ -120,7 +122,7 @@ app.post('/api/export/:storeName/resume', async (req: Request, res: Response) =>
   if (!jobToResume) {
     // Find the latest failed job for this store
     const jobs = getExportJobsByStore(storeName, 10);
-    jobToResume = jobs.find(job => job.status === 'failed') || null;
+    jobToResume = jobs.find(job => job.status === 'failed' || job.status === 'in_progress') || null;
   }
 
   if (!jobToResume) {
@@ -131,9 +133,9 @@ app.post('/api/export/:storeName/resume', async (req: Request, res: Response) =>
     });
   }
 
-  if (jobToResume.status !== 'failed') {
+  if (jobToResume.status !== 'failed' && jobToResume.status !== 'in_progress') {
     return res.status(400).json({
-      error: 'Can only resume failed jobs',
+      error: 'Can only resume failed or in_progress jobs',
       jobStatus: jobToResume.status,
       jobId: jobToResume.id,
     });
@@ -143,7 +145,7 @@ app.post('/api/export/:storeName/resume', async (req: Request, res: Response) =>
     return res.status(400).json({
       error: 'Job has no saved cursor to resume from',
       jobId: jobToResume.id,
-      hint: 'The job may have failed before processing any batches. Start a new export instead.',
+      hint: 'The job may have failed or is still in progress before processing any batches. Start a new export instead.',
     });
   }
 
@@ -175,6 +177,7 @@ app.post('/api/export/:storeName/resume', async (req: Request, res: Response) =>
     jobId: jobToResume.id,
     resumedFrom: jobToResume.processedCustomers,
     status: 'Export running in background. Use /api/status/:storeName to check progress.',
+    downloadUrl: exportCsv ? `/api/download-csv/job/${jobToResume.id}` : null,
   });
 });
 
@@ -254,6 +257,7 @@ app.post('/api/export-csv/:storeName', async (req: Request, res: Response) => {
       message: 'CSV export completed',
       storeName,
       filePath: csvPath,
+      downloadUrl: `/api/download-csv/${storeName}/latest`,
     });
   } catch (error) {
     console.error(`CSV export error:`, error);
@@ -263,6 +267,164 @@ app.post('/api/export-csv/:storeName', async (req: Request, res: Response) => {
     });
   }
 });
+
+// Download CSV file by job ID
+app.get('/api/download-csv/job/:jobId', (req: Request, res: Response) => {
+  const { jobId } = req.params;
+
+  const job = getExportJob(jobId);
+
+  if (!job) {
+    return res.status(404).json({ error: 'Job not found' });
+  }
+
+  if (!job.csvFilePath) {
+    return res.status(404).json({
+      error: 'No CSV file found for this job',
+      jobId,
+      hint: 'The export may not have generated a CSV file yet. Use POST /api/export-csv/:storeName to generate one.',
+    });
+  }
+
+  const filePath = path.resolve(job.csvFilePath);
+
+  // Check if file exists
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).json({
+      error: 'CSV file not found on disk',
+      filePath: job.csvFilePath,
+    });
+  }
+
+  // Get filename from path
+  const fileName = path.basename(filePath);
+
+  // Set headers for file download
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+
+  // Send file
+  res.sendFile(filePath, (err) => {
+    if (err) {
+      console.error(`Error sending file:`, err);
+      if (!res.headersSent) {
+        res.status(500).json({
+          error: 'Error downloading file',
+          message: err.message,
+        });
+      }
+    }
+  });
+});
+
+// Download latest CSV file for a store
+app.get('/api/download-csv/:storeName/latest', (req: Request, res: Response) => {
+  const { storeName } = req.params;
+
+  // Validate store name
+  if (!(storeName in storeConfigs)) {
+    return res.status(400).json({
+      error: 'Invalid store name',
+      availableStores: Object.keys(storeConfigs),
+    });
+  }
+
+  const latestJob = getLatestExportJob(storeName);
+
+  if (!latestJob) {
+    return res.status(404).json({
+      error: 'No export job found for this store',
+      storeName,
+      hint: 'Start an export first using POST /api/export/:storeName',
+    });
+  }
+
+  if (!latestJob.csvFilePath) {
+    return res.status(404).json({
+      error: 'No CSV file found for the latest export',
+      storeName,
+      jobId: latestJob.id,
+      hint: 'Generate a CSV file using POST /api/export-csv/:storeName',
+    });
+  }
+
+  const filePath = path.resolve(latestJob.csvFilePath);
+
+  // Check if file exists
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).json({
+      error: 'CSV file not found on disk',
+      filePath: latestJob.csvFilePath,
+    });
+  }
+
+  // Get filename from path
+  const fileName = path.basename(filePath);
+
+  // Set headers for file download
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+
+  // Send file
+  res.sendFile(filePath, (err) => {
+    if (err) {
+      console.error(`Error sending file:`, err);
+      if (!res.headersSent) {
+        res.status(500).json({
+          error: 'Error downloading file',
+          message: err.message,
+        });
+      }
+    }
+  });
+});
+
+// List all CSV files for a store
+app.get('/api/csv-files/:storeName', (req: Request, res: Response) => {
+  const { storeName } = req.params;
+
+  // Validate store name
+  if (!(storeName in storeConfigs)) {
+    return res.status(400).json({
+      error: 'Invalid store name',
+      availableStores: Object.keys(storeConfigs),
+    });
+  }
+
+  // Get all jobs with CSV files for this store
+  const jobs = getExportJobsByStore(storeName, 100); // Get more jobs to find CSV files
+  const csvFiles = jobs
+    .filter(job => job.csvFilePath && fs.existsSync(path.resolve(job.csvFilePath)))
+    .map(job => {
+      const filePath = path.resolve(job.csvFilePath!);
+      const stats = fs.statSync(filePath);
+      return {
+        jobId: job.id,
+        fileName: path.basename(filePath),
+        filePath: job.csvFilePath,
+        fileSize: stats.size,
+        fileSizeFormatted: formatFileSize(stats.size),
+        createdAt: job.completedAt || job.startedAt,
+        downloadUrl: `/api/download-csv/job/${job.id}`,
+      };
+    })
+    .sort((a, b) => new Date(b.createdAt!).getTime() - new Date(a.createdAt!).getTime());
+
+  res.json({
+    storeName,
+    csvFiles,
+    count: csvFiles.length,
+  });
+});
+
+// Helper function to format file size
+function formatFileSize(bytes: number): string {
+  if (bytes === 0) return '0 Bytes';
+  const k = 1024;
+  const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i];
+}
 
 // Get all export statuses
 app.get('/api/status', (req: Request, res: Response) => {
@@ -323,6 +485,9 @@ app.listen(PORT, () => {
   console.log(`  GET  /api/job/:jobId                  - Get job details`);
   console.log(`  GET  /api/history/:storeName          - Get export history`);
   console.log(`  POST /api/export-csv/:storeName       - Export to CSV from database`);
+  console.log(`  GET  /api/download-csv/:storeName/latest - Download latest CSV`);
+  console.log(`  GET  /api/download-csv/job/:jobId     - Download CSV by job ID`);
+  console.log(`  GET  /api/csv-files/:storeName        - List all CSV files for store`);
   console.log(`\n`);
 });
 
