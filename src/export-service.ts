@@ -232,21 +232,21 @@ export async function fetchAndSaveCustomers(
 
       hasNextPage = response.data.customers.pageInfo.hasNextPage;
       cursor = response.data.customers.pageInfo.endCursor;
-      if (batchNumber >= 3) {
-        hasNextPage = false;
+      // if (batchNumber >= 3) {
+      //   hasNextPage = false;
 
-        const nextCursor = response.data.customers.pageInfo.endCursor;
-        updateExportJob(exportJobId, {
-          status: 'failed',
-          error: 'limit reached',
-          completedAt: new Date().toISOString(),
-          lastCursor: nextCursor,
-        });
+      //   const nextCursor = response.data.customers.pageInfo.endCursor;
+      //   updateExportJob(exportJobId, {
+      //     status: 'failed',
+      //     error: 'limit reached',
+      //     completedAt: new Date().toISOString(),
+      //     lastCursor: nextCursor,
+      //   });
 
-        console.log(`Failed to fetch customers for ${storeName}: limit reached`);
+      //   console.log(`Failed to fetch customers for ${storeName}: limit reached`);
 
-        return { totalCustomers, jobId: exportJobId };
-      }
+      //   return { totalCustomers, jobId: exportJobId };
+      // }
 
       // Add delay between requests
       if (hasNextPage) {
