@@ -46,7 +46,8 @@ export function initializeDatabase() {
       started_at TEXT NOT NULL,
       completed_at TEXT,
       error TEXT,
-      csv_file_path TEXT
+      csv_file_path TEXT,
+      last_cursor TEXT
     )
   `);
 
@@ -157,6 +158,10 @@ export function updateExportJob(jobId: string, updates: Partial<ExportJob>) {
     fields.push('csv_file_path = ?');
     values.push(updates.csvFilePath);
   }
+  if (updates.lastCursor !== undefined) {
+    fields.push('last_cursor = ?');
+    values.push(updates.lastCursor);
+  }
 
   if (fields.length === 0) return;
 
@@ -180,7 +185,8 @@ export function getExportJob(jobId: string): ExportJob | null {
     startedAt: row.started_at,
     completedAt: row.completed_at,
     error: row.error,
-    csvFilePath: row.csv_file_path
+    csvFilePath: row.csv_file_path,
+    lastCursor: row.last_cursor
   };
 }
 
@@ -203,7 +209,8 @@ export function getExportJobsByStore(storeName: string, limit: number = 10): Exp
     startedAt: row.started_at,
     completedAt: row.completed_at,
     error: row.error,
-    csvFilePath: row.csv_file_path
+    csvFilePath: row.csv_file_path,
+    lastCursor: row.last_cursor
   }));
 }
 
@@ -227,7 +234,8 @@ export function getLatestExportJob(storeName?: string): ExportJob | null {
       startedAt: row.started_at,
       completedAt: row.completed_at,
       error: row.error,
-      csvFilePath: row.csv_file_path
+      csvFilePath: row.csv_file_path,
+      lastCursor: row.last_cursor
     };
   } else {
     stmt = db.prepare(`SELECT * FROM export_jobs ORDER BY started_at DESC LIMIT 1`);
@@ -242,7 +250,8 @@ export function getLatestExportJob(storeName?: string): ExportJob | null {
       startedAt: row.started_at,
       completedAt: row.completed_at,
       error: row.error,
-      csvFilePath: row.csv_file_path
+      csvFilePath: row.csv_file_path,
+      lastCursor: row.last_cursor
     };
   }
 }

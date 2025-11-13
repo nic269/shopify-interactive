@@ -125,5 +125,6 @@ export interface ExportJob {
   completedAt?: string;
   error?: string;
   csvFilePath?: string;
+  lastCursor?: string; // For resuming failed exports
 }
 

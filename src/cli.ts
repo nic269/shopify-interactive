@@ -8,7 +8,7 @@ require('dotenv').config({
 import * as path from 'path';
 import { fetchAndSaveCustomers, exportCustomersToCSV } from './export-service';
 import { storeConfigs } from './shopify-client';
-import { getCustomerCount } from './database';
+import { getCustomerCount, getExportJobsByStore } from './database';
 
 async function main() {
   const command = process.argv[2];
@@ -25,6 +25,7 @@ Commands:
   fetch <storeName>   - Fetch customers from Shopify and save to database
   csv <storeName>     - Export customers from database to CSV
   both <storeName>    - Fetch from Shopify then export to CSV
+  resume <storeName>  - Resume a failed export from the last saved position
   count <storeName>   - Show customer count in database
   list                - List all stores and their customer counts
 
@@ -32,6 +33,7 @@ Examples:
   npm run export -- fetch evisu-us
   npm run export -- csv evisu-us
   npm run export -- both evisu-us
+  npm run export -- resume evisu-us
   npm run export -- count evisu-us
   npm run export -- list
 
@@ -94,9 +96,46 @@ Available stores: ${Object.keys(storeConfigs).join(', ')}
         console.log(`\n📊 ${storeName}: ${count.toLocaleString()} customers in database\n`);
         break;
 
+      case 'resume':
+        console.log(`\n🔄 Looking for failed export to resume for ${storeName}...\n`);
+        
+        // Find the latest failed job
+        const jobs = getExportJobsByStore(storeName, 10);
+        const failedJob = jobs.find(job => job.status === 'failed');
+        
+        if (!failedJob) {
+          console.error(`❌ No failed export found for ${storeName}`);
+          console.error(`   Use 'fetch' command to start a new export`);
+          process.exit(1);
+        }
+        
+        if (!failedJob.lastCursor) {
+          console.error(`❌ Failed job has no saved cursor to resume from`);
+          console.error(`   Job ID: ${failedJob.id}`);
+          console.error(`   The job may have failed before processing any batches.`);
+          console.error(`   Use 'fetch' command to start a new export`);
+          process.exit(1);
+        }
+        
+        console.log(`Found failed job: ${failedJob.id}`);
+        console.log(`Previously processed: ${failedJob.processedCustomers.toLocaleString()} customers`);
+        console.log(`Error: ${failedJob.error}`);
+        console.log(`\n📥 Resuming export...\n`);
+        
+        const resumeResult = await fetchAndSaveCustomers(
+          storeName,
+          failedJob.id,
+          failedJob.lastCursor
+        );
+        
+        console.log(`\n✅ Success! Export completed`);
+        console.log(`Total customers: ${resumeResult.totalCustomers.toLocaleString()}`);
+        console.log(`Job ID: ${resumeResult.jobId}`);
+        break;
+
       default:
         console.error(`❌ Error: Unknown command: ${command}`);
-        console.error(`Available commands: fetch, csv, both, count, list`);
+        console.error(`Available commands: fetch, csv, both, resume, count, list`);
         process.exit(1);
     }
 

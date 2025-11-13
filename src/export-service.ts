@@ -22,7 +22,8 @@ const DELAY_BETWEEN_REQUESTS_MS = 500;
  */
 export async function fetchAndSaveCustomers(
   storeName: string,
-  jobId?: string
+  jobId?: string,
+  startCursor?: string
 ): Promise<{ totalCustomers: number; jobId: string }> {
   const shopify = createShopifyClient(storeName as keyof typeof storeConfigs);
 
@@ -34,11 +35,12 @@ export async function fetchAndSaveCustomers(
   updateExportJob(exportJobId, { status: 'in_progress' });
 
   let hasNextPage = true;
-  let cursor: string | null = null;
+  let cursor: string | null = startCursor || null;
   let batchNumber = 0;
-  let totalCustomers = 0;
+  let totalCustomers = job?.processedCustomers || 0; // Start from existing count if resuming
 
-  console.log(`Starting to fetch customers for ${storeName}`);
+  const resumeInfo = startCursor ? ` (resuming from cursor, ${totalCustomers} already processed)` : '';
+  console.log(`Starting to fetch customers for ${storeName}${resumeInfo}`);
 
   try {
     while (hasNextPage) {
@@ -214,9 +216,13 @@ export async function fetchAndSaveCustomers(
         saveCustomers(storeName, customers);
         totalCustomers += customers.length;
 
-        // Update job progress
+        // Update pagination cursor before updating progress (in case of failure)
+        const nextCursor = response.data.customers.pageInfo.endCursor;
+
+        // Update job progress AND cursor after successful batch
         updateExportJob(exportJobId, {
           processedCustomers: totalCustomers,
+          lastCursor: nextCursor, // Save cursor for resume capability
         });
 
         console.log(
@@ -226,9 +232,21 @@ export async function fetchAndSaveCustomers(
 
       hasNextPage = response.data.customers.pageInfo.hasNextPage;
       cursor = response.data.customers.pageInfo.endCursor;
-      // if (batchNumber >= 3) {
-      //   hasNextPage = false;
-      // }
+      if (batchNumber >= 3) {
+        hasNextPage = false;
+
+        const nextCursor = response.data.customers.pageInfo.endCursor;
+        updateExportJob(exportJobId, {
+          status: 'failed',
+          error: 'limit reached',
+          completedAt: new Date().toISOString(),
+          lastCursor: nextCursor,
+        });
+
+        console.log(`Failed to fetch customers for ${storeName}: limit reached`);
+
+        return { totalCustomers, jobId: exportJobId };
+      }
 
       // Add delay between requests
       if (hasNextPage) {
@@ -236,11 +254,12 @@ export async function fetchAndSaveCustomers(
       }
     }
 
-    // Update job as completed
+    // Update job as completed (clear cursor on success)
     updateExportJob(exportJobId, {
       status: 'completed',
       totalCustomers,
       completedAt: new Date().toISOString(),
+      lastCursor: undefined, // Clear cursor on completion
     });
 
     console.log(`Successfully fetched and saved ${totalCustomers} customers for ${storeName}`);
@@ -249,11 +268,12 @@ export async function fetchAndSaveCustomers(
   } catch (error) {
     console.error(`Error fetching customers:`, error);
 
-    // Update job as failed
+    // Update job as failed (cursor is already saved from last successful batch)
     updateExportJob(exportJobId, {
       status: 'failed',
       error: error instanceof Error ? error.message : String(error),
       completedAt: new Date().toISOString(),
+      // Note: lastCursor is preserved from the last successful batch
     });
 
     throw error;
