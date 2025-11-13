@@ -226,9 +226,9 @@ export async function fetchAndSaveCustomers(
 
       hasNextPage = response.data.customers.pageInfo.hasNextPage;
       cursor = response.data.customers.pageInfo.endCursor;
-      if (batchNumber >= 3) {
-        hasNextPage = false;
-      }
+      // if (batchNumber >= 3) {
+      //   hasNextPage = false;
+      // }
 
       // Add delay between requests
       if (hasNextPage) {
