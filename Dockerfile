@@ -9,13 +9,14 @@ WORKDIR /app
 COPY package.json package-lock.json* ./
 
 # Install all dependencies (including devDependencies for build)
-RUN npm ci || npm install
+# Explicitly set NODE_ENV to ensure devDependencies are installed
+RUN NODE_ENV=development npm ci || NODE_ENV=development npm install
 
 # Copy source code
 COPY . .
 
-# Build TypeScript (using npx to ensure tsc is found)
-RUN npx tsc
+# Build TypeScript
+RUN npm run build
 
 # Create data directory
 RUN mkdir -p /app/data /app/exports
