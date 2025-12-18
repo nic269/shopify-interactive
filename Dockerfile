@@ -6,16 +6,16 @@ RUN apk add --no-cache python3 make g++
 WORKDIR /app
 
 # Copy package files
-COPY package.json ./
+COPY package.json package-lock.json* ./
 
-# Install dependencies
-RUN npm install
+# Install all dependencies (including devDependencies for build)
+RUN npm ci || npm install
 
 # Copy source code
 COPY . .
 
-# Build TypeScript
-RUN npm run build
+# Build TypeScript (using npx to ensure tsc is found)
+RUN npx tsc
 
 # Create data directory
 RUN mkdir -p /app/data /app/exports
