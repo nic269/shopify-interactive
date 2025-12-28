@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import * as path from 'path';
 import * as fs from 'fs';
-import { CustomerData, ExportJob, ExportStatus } from './types';
+import { CustomerData, ExportJob, ExportStatus, OrderData } from './types';
 
 const DB_PATH = process.env.DATABASE_PATH || path.join(__dirname, '../data/customers.db');
 
@@ -56,6 +56,23 @@ export function initializeDatabase() {
     CREATE INDEX IF NOT EXISTS idx_jobs_store ON export_jobs(store_name);
     CREATE INDEX IF NOT EXISTS idx_jobs_status ON export_jobs(status);
     CREATE INDEX IF NOT EXISTS idx_jobs_started ON export_jobs(started_at);
+  `);
+
+  // Create orders table
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS orders (
+      id TEXT PRIMARY KEY,
+      store_name TEXT NOT NULL,
+      data TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )
+  `);
+
+  // Create indexes for orders
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_orders_store ON orders(store_name);
+    CREATE INDEX IF NOT EXISTS idx_orders_updated ON orders(updated_at);
   `);
 
   console.log('✓ Database initialized');
@@ -254,6 +271,54 @@ export function getLatestExportJob(storeName?: string): ExportJob | null {
       lastCursor: row.last_cursor
     };
   }
+}
+
+// Order operations
+export function saveOrders(storeName: string, orders: OrderData[]) {
+  const insert = db.prepare(`
+    INSERT OR REPLACE INTO orders (id, store_name, data, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?)
+  `);
+
+  const insertMany = db.transaction((ordersData: OrderData[]) => {
+    const now = new Date().toISOString();
+    for (const order of ordersData) {
+      // Use order name as ID since we don't have a separate ID field
+      insert.run(
+        order.name,
+        storeName,
+        JSON.stringify(order),
+        order.createdAt || now,
+        now
+      );
+    }
+  });
+
+  insertMany(orders);
+}
+
+export function getOrdersByStore(storeName: string): OrderData[] {
+  const stmt = db.prepare(`
+    SELECT data FROM orders WHERE store_name = ? ORDER BY updated_at DESC
+  `);
+
+  const rows = stmt.all(storeName) as Array<{ data: string }>;
+  return rows.map(row => JSON.parse(row.data));
+}
+
+export function getOrderCount(storeName: string): number {
+  const stmt = db.prepare(`
+    SELECT COUNT(*) as count FROM orders WHERE store_name = ?
+  `);
+
+  const result = stmt.get(storeName) as { count: number };
+  return result.count;
+}
+
+export function deleteOrdersByStore(storeName: string): number {
+  const stmt = db.prepare(`DELETE FROM orders WHERE store_name = ?`);
+  const result = stmt.run(storeName);
+  return result.changes;
 }
 
 export function closeDatabase() {

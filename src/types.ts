@@ -128,3 +128,53 @@ export interface ExportJob {
   lastCursor?: string; // For resuming failed exports
 }
 
+export type OrderLineItem = {
+  title: string;
+  originalTotalSet: {
+    shopMoney: {
+      amount: string;
+    };
+  };
+  quantity: number;
+  sku: string | null;
+  fulfillmentStatus: string;
+};
+
+export type OrderData = {
+  email: string | null;
+  name: string;
+  displayFinancialStatus: string;
+  displayFulfillmentStatus: string;
+  fulfillments: Array<{
+    createdAt: string;
+  }>;
+  currencyCode: string;
+  subtotalPriceSet: {
+    shopMoney: {
+      amount: string;
+    };
+  };
+  tags: string[];
+  shippingLine: {
+    title: string;
+  } | null;
+  createdAt: string;
+  lineItems: {
+    nodes: OrderLineItem[];
+  };
+  shippingAddress: {
+    name: string | null;
+    phone: string | null;
+    country: string | null;
+  } | null;
+  paymentGatewayNames: string[];
+  refunds: Array<{
+    totalRefundedSet: {
+      shopMoney: {
+        amount: string;
+      };
+    };
+  }>;
+  sourceName: string | null;
+};
+

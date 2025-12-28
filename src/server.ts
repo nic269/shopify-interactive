@@ -7,12 +7,13 @@ require('dotenv').config({
 import express, { Request, Response } from 'express';
 import * as path from 'path';
 import * as fs from 'fs';
-import { fetchAndSaveCustomers, exportCustomersToCSV } from './export-service';
+import { fetchAndSaveCustomers, exportCustomersToCSV, fetchAndSaveOrders, exportOrdersToCSV } from './export-service';
 import {
   getExportJob,
   getExportJobsByStore,
   getLatestExportJob,
   getCustomerCount,
+  getOrderCount,
 } from './database';
 import { storeConfigs } from './shopify-client';
 
@@ -35,6 +36,7 @@ app.get('/api/stores', (req: Request, res: Response) => {
   const stores = Object.keys(storeConfigs).map((storeName) => ({
     name: storeName,
     customerCount: getCustomerCount(storeName),
+    orderCount: getOrderCount(storeName),
   }));
 
   res.json({ stores });
@@ -432,16 +434,364 @@ app.get('/api/status', (req: Request, res: Response) => {
     const latestJob = getLatestExportJob(storeName);
     const isExporting = activeExports.get(storeName) || false;
     const customerCount = getCustomerCount(storeName);
+    const orderCount = getOrderCount(storeName);
 
     return {
       storeName,
       isExporting,
       customerCount,
+      orderCount,
       latestJob: latestJob || null,
     };
   });
 
   res.json({ stores: allStores });
+});
+
+// ========== ORDER EXPORT ENDPOINTS ==========
+
+// Trigger order export for a store
+app.post('/api/export-orders/:storeName', async (req: Request, res: Response) => {
+  const { storeName } = req.params;
+  const { exportCsv = false } = req.body;
+
+  // Validate store name
+  if (!(storeName in storeConfigs)) {
+    return res.status(400).json({
+      error: 'Invalid store name',
+      availableStores: Object.keys(storeConfigs),
+    });
+  }
+
+  // Check if export is already running for this store
+  const exportKey = `orders_${storeName}`;
+  if (activeExports.get(exportKey)) {
+    return res.status(409).json({
+      error: 'Order export already in progress for this store',
+      storeName,
+    });
+  }
+
+  // Start export in background
+  activeExports.set(exportKey, true);
+
+  // Return immediately with job info
+  const latestJob = getLatestExportJob(storeName);
+
+  // Run export in background
+  (async () => {
+    try {
+      console.log(`Starting order export for ${storeName}...`);
+      const result = await fetchAndSaveOrders(storeName);
+      console.log(`Order export completed for ${storeName}: ${result.totalOrders} orders`);
+
+      // Optionally export to CSV
+      if (exportCsv) {
+        await exportOrdersToCSV(storeName, result.jobId);
+        console.log(`Order CSV export completed for ${storeName}`);
+      }
+    } catch (error) {
+      console.error(`Order export failed for ${storeName}:`, error);
+    } finally {
+      activeExports.delete(exportKey);
+    }
+  })();
+
+  res.json({
+    message: 'Order export started',
+    storeName,
+    jobId: latestJob?.id || 'pending',
+    status: 'Export running in background. Use /api/status-orders/:storeName to check progress.',
+    downloadUrl: exportCsv ? `/api/download-orders-csv/${storeName}/latest` : null,
+  });
+});
+
+// Resume a failed order export
+app.post('/api/export-orders/:storeName/resume', async (req: Request, res: Response) => {
+  const { storeName } = req.params;
+  const { exportCsv = false, jobId } = req.body;
+
+  // Validate store name
+  if (!(storeName in storeConfigs)) {
+    return res.status(400).json({
+      error: 'Invalid store name',
+      availableStores: Object.keys(storeConfigs),
+    });
+  }
+
+  // Check if export is already running for this store
+  const exportKey = `orders_${storeName}`;
+  if (activeExports.get(exportKey)) {
+    return res.status(409).json({
+      error: 'Order export already in progress for this store',
+      storeName,
+    });
+  }
+
+  // Get the job to resume
+  let jobToResume = jobId ? getExportJob(jobId) : null;
+  
+  if (!jobToResume) {
+    const jobs = getExportJobsByStore(storeName, 10);
+    jobToResume = jobs.find(job => job.status === 'failed' || job.status === 'in_progress') || null;
+  }
+
+  if (!jobToResume) {
+    return res.status(404).json({
+      error: 'No failed order export job found to resume',
+      storeName,
+      hint: 'Use POST /api/export-orders/:storeName to start a new export',
+    });
+  }
+
+  if (jobToResume.status !== 'failed' && jobToResume.status !== 'in_progress') {
+    return res.status(400).json({
+      error: 'Can only resume failed or in_progress jobs',
+      jobStatus: jobToResume.status,
+      jobId: jobToResume.id,
+    });
+  }
+
+  if (!jobToResume.lastCursor) {
+    return res.status(400).json({
+      error: 'Job has no saved cursor to resume from',
+      jobId: jobToResume.id,
+    });
+  }
+
+  // Start resume in background
+  activeExports.set(exportKey, true);
+
+  // Run resume in background
+  (async () => {
+    try {
+      console.log(`Resuming order export for ${storeName} from cursor (${jobToResume!.processedCustomers} already processed)...`);
+      const result = await fetchAndSaveOrders(storeName, jobToResume!.id, jobToResume!.lastCursor || undefined);
+      console.log(`Order export resumed and completed for ${storeName}: ${result.totalOrders} total orders`);
+
+      // Optionally export to CSV
+      if (exportCsv) {
+        await exportOrdersToCSV(storeName, result.jobId);
+        console.log(`Order CSV export completed for ${storeName}`);
+      }
+    } catch (error) {
+      console.error(`Order export resume failed for ${storeName}:`, error);
+    } finally {
+      activeExports.delete(exportKey);
+    }
+  })();
+
+  res.json({
+    message: 'Order export resumed',
+    storeName,
+    jobId: jobToResume.id,
+    resumedFrom: jobToResume.processedCustomers,
+    status: 'Export running in background. Use /api/status-orders/:storeName to check progress.',
+    downloadUrl: exportCsv ? `/api/download-orders-csv/job/${jobToResume.id}` : null,
+  });
+});
+
+// Get order export status for a store
+app.get('/api/status-orders/:storeName', (req: Request, res: Response) => {
+  const { storeName } = req.params;
+
+  // Validate store name
+  if (!(storeName in storeConfigs)) {
+    return res.status(400).json({
+      error: 'Invalid store name',
+      availableStores: Object.keys(storeConfigs),
+    });
+  }
+
+  const latestJob = getLatestExportJob(storeName);
+  const exportKey = `orders_${storeName}`;
+  const isExporting = activeExports.get(exportKey) || false;
+  const orderCount = getOrderCount(storeName);
+
+  res.json({
+    storeName,
+    isExporting,
+    orderCount,
+    latestJob: latestJob || null,
+  });
+});
+
+// Export orders to CSV from database (without re-fetching from Shopify)
+app.post('/api/export-orders-csv/:storeName', async (req: Request, res: Response) => {
+  const { storeName } = req.params;
+
+  // Validate store name
+  if (!(storeName in storeConfigs)) {
+    return res.status(400).json({
+      error: 'Invalid store name',
+      availableStores: Object.keys(storeConfigs),
+    });
+  }
+
+  try {
+    const csvPath = await exportOrdersToCSV(storeName);
+    res.json({
+      message: 'Order CSV export completed',
+      storeName,
+      filePath: csvPath,
+      downloadUrl: `/api/download-orders-csv/${storeName}/latest`,
+    });
+  } catch (error) {
+    console.error(`Order CSV export error:`, error);
+    res.status(500).json({
+      error: 'Order CSV export failed',
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
+});
+
+// Download order CSV file by job ID
+app.get('/api/download-orders-csv/job/:jobId', (req: Request, res: Response) => {
+  const { jobId } = req.params;
+
+  const job = getExportJob(jobId);
+
+  if (!job) {
+    return res.status(404).json({ error: 'Job not found' });
+  }
+
+  if (!job.csvFilePath) {
+    return res.status(404).json({
+      error: 'No CSV file found for this job',
+      jobId,
+      hint: 'The export may not have generated a CSV file yet. Use POST /api/export-orders-csv/:storeName to generate one.',
+    });
+  }
+
+  const filePath = path.resolve(job.csvFilePath);
+
+  // Check if file exists
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).json({
+      error: 'CSV file not found on disk',
+      filePath: job.csvFilePath,
+    });
+  }
+
+  // Get filename from path
+  const fileName = path.basename(filePath);
+
+  // Set headers for file download
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+
+  // Send file
+  res.sendFile(filePath, (err) => {
+    if (err) {
+      console.error(`Error sending file:`, err);
+      if (!res.headersSent) {
+        res.status(500).json({
+          error: 'Error downloading file',
+          message: err.message,
+        });
+      }
+    }
+  });
+});
+
+// Download latest order CSV file for a store
+app.get('/api/download-orders-csv/:storeName/latest', (req: Request, res: Response) => {
+  const { storeName } = req.params;
+
+  // Validate store name
+  if (!(storeName in storeConfigs)) {
+    return res.status(400).json({
+      error: 'Invalid store name',
+      availableStores: Object.keys(storeConfigs),
+    });
+  }
+
+  const latestJob = getLatestExportJob(storeName);
+
+  if (!latestJob) {
+    return res.status(404).json({
+      error: 'No export job found for this store',
+      storeName,
+      hint: 'Start an export first using POST /api/export-orders/:storeName',
+    });
+  }
+
+  if (!latestJob.csvFilePath) {
+    return res.status(404).json({
+      error: 'No CSV file found for the latest export',
+      storeName,
+      jobId: latestJob.id,
+      hint: 'Generate a CSV file using POST /api/export-orders-csv/:storeName',
+    });
+  }
+
+  const filePath = path.resolve(latestJob.csvFilePath);
+
+  // Check if file exists
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).json({
+      error: 'CSV file not found on disk',
+      filePath: latestJob.csvFilePath,
+    });
+  }
+
+  // Get filename from path
+  const fileName = path.basename(filePath);
+
+  // Set headers for file download
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+
+  // Send file
+  res.sendFile(filePath, (err) => {
+    if (err) {
+      console.error(`Error sending file:`, err);
+      if (!res.headersSent) {
+        res.status(500).json({
+          error: 'Error downloading file',
+          message: err.message,
+        });
+      }
+    }
+  });
+});
+
+// List all order CSV files for a store
+app.get('/api/orders-csv-files/:storeName', (req: Request, res: Response) => {
+  const { storeName } = req.params;
+
+  // Validate store name
+  if (!(storeName in storeConfigs)) {
+    return res.status(400).json({
+      error: 'Invalid store name',
+      availableStores: Object.keys(storeConfigs),
+    });
+  }
+
+  // Get all jobs with CSV files for this store
+  const jobs = getExportJobsByStore(storeName, 100);
+  const csvFiles = jobs
+    .filter(job => job.csvFilePath && job.csvFilePath.includes('orders-') && fs.existsSync(path.resolve(job.csvFilePath)))
+    .map(job => {
+      const filePath = path.resolve(job.csvFilePath!);
+      const stats = fs.statSync(filePath);
+      return {
+        jobId: job.id,
+        fileName: path.basename(filePath),
+        filePath: job.csvFilePath,
+        fileSize: stats.size,
+        fileSizeFormatted: formatFileSize(stats.size),
+        createdAt: job.completedAt || job.startedAt,
+        downloadUrl: `/api/download-orders-csv/job/${job.id}`,
+      };
+    })
+    .sort((a, b) => new Date(b.createdAt!).getTime() - new Date(a.createdAt!).getTime());
+
+  res.json({
+    storeName,
+    csvFiles,
+    count: csvFiles.length,
+  });
 });
 
 // Error handler
@@ -478,16 +828,25 @@ app.listen(PORT, () => {
   console.log(`\nEndpoints:`);
   console.log(`  GET  /health                          - Health check`);
   console.log(`  GET  /api/stores                      - List all stores`);
-  console.log(`  POST /api/export/:storeName           - Start export for a store`);
-  console.log(`  POST /api/export/:storeName/resume    - Resume failed export`);
-  console.log(`  GET  /api/status/:storeName           - Get export status`);
+  console.log(`\nCustomer Export:`);
+  console.log(`  POST /api/export/:storeName           - Start customer export for a store`);
+  console.log(`  POST /api/export/:storeName/resume    - Resume failed customer export`);
+  console.log(`  GET  /api/status/:storeName           - Get customer export status`);
   console.log(`  GET  /api/status                      - Get all store statuses`);
   console.log(`  GET  /api/job/:jobId                  - Get job details`);
   console.log(`  GET  /api/history/:storeName          - Get export history`);
-  console.log(`  POST /api/export-csv/:storeName       - Export to CSV from database`);
-  console.log(`  GET  /api/download-csv/:storeName/latest - Download latest CSV`);
-  console.log(`  GET  /api/download-csv/job/:jobId     - Download CSV by job ID`);
-  console.log(`  GET  /api/csv-files/:storeName        - List all CSV files for store`);
+  console.log(`  POST /api/export-csv/:storeName       - Export customers to CSV from database`);
+  console.log(`  GET  /api/download-csv/:storeName/latest - Download latest customer CSV`);
+  console.log(`  GET  /api/download-csv/job/:jobId     - Download customer CSV by job ID`);
+  console.log(`  GET  /api/csv-files/:storeName        - List all customer CSV files for store`);
+  console.log(`\nOrder Export:`);
+  console.log(`  POST /api/export-orders/:storeName    - Start order export for a store`);
+  console.log(`  POST /api/export-orders/:storeName/resume - Resume failed order export`);
+  console.log(`  GET  /api/status-orders/:storeName     - Get order export status`);
+  console.log(`  POST /api/export-orders-csv/:storeName - Export orders to CSV from database`);
+  console.log(`  GET  /api/download-orders-csv/:storeName/latest - Download latest order CSV`);
+  console.log(`  GET  /api/download-orders-csv/job/:jobId - Download order CSV by job ID`);
+  console.log(`  GET  /api/orders-csv-files/:storeName  - List all order CSV files for store`);
   console.log(`\n`);
 });
 
